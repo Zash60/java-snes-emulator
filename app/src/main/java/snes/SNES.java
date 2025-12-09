@@ -1,11 +1,12 @@
 package snes;
 import com.javasnes.EmulatorView;
+import java.util.ArrayList;
 public class SNES {
     public Memory memory; public Processor65816 processor; public PPU ppu; public DMA[] dma = new DMA[8];
     public Video video; public Screen screen; public SPC700 spc700; public DSP dsp;
     public Gameboy gameboy; public NES nes; public Romhack romhack;
     public boolean dogameboy = false; public boolean dones = false; public boolean doromhack = false;
-    public String gamename = "game.smc"; public String sramname = "";
+    public String gamename = "game.bin"; public String sramname = "";
     public boolean cycleAccurate = false; public boolean IRQEnabled = false; public boolean multithreaded = false;
     public boolean apuEnabled = true; public boolean ischrono = false; public boolean debugMode = false;
     public boolean mute = false; public boolean recalculateIPS = true;
@@ -34,30 +35,28 @@ public class SNES {
         for(int i=0; i<8; i++) dma[i] = new DMA(this, i);
     }
     
-    // NOVO: Carrega os bytes na memoria e reseta
     public void loadRom(byte[] romData) {
         memory.loadRomBytes(romData);
         initializeSNES();
     }
 
     public void initializeSNES() { processor.reset(); spc700.reset(); ppu.ppureset(); }
+    
     public void mainLoop() {
         long frametime = System.currentTimeMillis();
         while (true) {
             if(!processor.waitForInterrupt) processor.doAnInstruction();
-            // Loop simplificado para evitar travamento no exemplo
-            ppu.VCounter++;
+            ppu.VCounter++; // Loop simplificado para evitar travamento
             if(ppu.VCounter > 262) { 
                 ppu.VCounter = 0; 
                 if(!skipframe) ppu.endScreenRefresh();
-                
-                // Controle de FPS simples
                 long curr = System.currentTimeMillis();
                 if(curr - frametime < 16) { try { Thread.sleep(16 - (curr - frametime)); } catch(Exception e){} }
                 frametime = curr;
             }
         }
     }
+    // Mocks
     public void docycles(int i) {}
     public void saveSRAM() {}
     public void dumpStateToFile(String f) {}

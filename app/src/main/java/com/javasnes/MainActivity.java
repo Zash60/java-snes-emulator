@@ -17,20 +17,15 @@ public class MainActivity extends Activity {
 
         new Thread(() -> {
             snes = new SNES(emulatorView);
-            
-            // Ler ROM da pasta assets
             try {
-                InputStream is = getAssets().open("game.smc");
+                // Lê o arquivo genérico 'game.bin' que foi copiado no passo anterior
+                InputStream is = getAssets().open("game.bin");
                 byte[] romData = new byte[is.available()];
                 is.read(romData);
                 is.close();
-                
-                // Carregar no emulador
                 snes.loadRom(romData);
                 snes.mainLoop();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+            } catch (IOException e) { e.printStackTrace(); }
         }).start();
     }
 }
