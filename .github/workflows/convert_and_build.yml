@@ -1,10 +1,13 @@
-name: Build Android APK
+name: Fix, Commit & Build
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write # Permissão necessária para o bot fazer o commit
+
 jobs:
-  build:
+  fix-and-build:
     runs-on: ubuntu-latest
 
     steps:
@@ -16,14 +19,45 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
-        cache: gradle
 
-    - name: 🛠️ Garantir Gradle Wrapper
-      # Garante que o wrapper exista caso não tenha sido commitado corretamente
-      run: gradle wrapper
+    - name: 🔧 Aplicar Correções (Gradle Wrapper & Properties)
+      run: |
+        # 1. Recriar Gradle Wrapper com versão 8.2 (Compatível com AGP 8.2.0)
+        # Isso resolve incompatibilidades de versão do Gradle
+        mkdir -p gradle/wrapper
+        echo "distributionBase=GRADLE_USER_HOME" > gradle/wrapper/gradle-wrapper.properties
+        echo "distributionPath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
+        echo "distributionUrl=https\://services.gradle.org/distributions/gradle-8.2-bin.zip" >> gradle/wrapper/gradle-wrapper.properties
+        echo "zipStoreBase=GRADLE_USER_HOME" >> gradle/wrapper/gradle-wrapper.properties
+        echo "zipStorePath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
 
-    - name: ⚙️ Corrigir Permissão do Gradlew
+        # 2. Resetar gradle.properties 
+        # Removemos o Jetifier pois ele causa o erro "Cannot mutate dependencies"
+        echo "org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8" > gradle.properties
+        echo "android.useAndroidX=true" >> gradle.properties
+
+    - name: 💾 Commitar e Enviar Correções (Push)
+      run: |
+        git config --global user.name 'GitHub Actions'
+        git config --global user.email 'actions@github.com'
+        
+        # Adiciona os arquivos modificados
+        git add gradle/wrapper/gradle-wrapper.properties gradle.properties
+        
+        # Verifica se há mudanças antes de commitar para não dar erro
+        if git diff --staged --quiet; then
+          echo "Nenhuma mudança necessária nos arquivos de configuração."
+        else
+          git commit -m "Fix: Force Gradle 8.2 and remove Jetifier to fix build error"
+          git push
+          echo "Correções enviadas para o repositório."
+        fi
+
+    - name: ⚙️ Permissão de Execução
       run: chmod +x gradlew
+
+    - name: 🧹 Limpar Cache do Build
+      run: ./gradlew clean
 
     - name: 🔨 Compilar APK (Debug)
       run: ./gradlew assembleDebug --stacktrace
@@ -31,5 +65,5 @@ jobs:
     - name: 📤 Upload do APK
       uses: actions/upload-artifact@v4
       with:
-        name: snes-emulator-debug
+        name: snes-android-debug
         path: app/build/outputs/apk/debug/app-debug.apk
