@@ -1,10 +1,10 @@
-name: Fix, Commit & Build
+name: Generate Wrapper, Fix & Build
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: write # Permissão necessária para o bot fazer o commit
+  contents: write # Permissão obrigatória para commitar o gradlew
 
 jobs:
   fix-and-build:
@@ -20,43 +20,38 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
 
-    - name: 🔧 Aplicar Correções (Gradle Wrapper & Properties)
-      run: |
-        # 1. Recriar Gradle Wrapper com versão 8.2 (Compatível com AGP 8.2.0)
-        # Isso resolve incompatibilidades de versão do Gradle
-        mkdir -p gradle/wrapper
-        echo "distributionBase=GRADLE_USER_HOME" > gradle/wrapper/gradle-wrapper.properties
-        echo "distributionPath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
-        echo "distributionUrl=https\://services.gradle.org/distributions/gradle-8.2-bin.zip" >> gradle/wrapper/gradle-wrapper.properties
-        echo "zipStoreBase=GRADLE_USER_HOME" >> gradle/wrapper/gradle-wrapper.properties
-        echo "zipStorePath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
+    - name: 🛠️ Gerar Gradle Wrapper (Correção do erro "No such file")
+      # O sistema gera o arquivo gradlew que estava faltando
+      run: gradle wrapper --gradle-version 8.2 --distribution-type bin
 
-        # 2. Resetar gradle.properties 
-        # Removemos o Jetifier pois ele causa o erro "Cannot mutate dependencies"
+    - name: 🔧 Corrigir gradle.properties
+      # Remove configurações conflitantes (Jetifier) e garante AndroidX
+      run: |
         echo "org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8" > gradle.properties
         echo "android.useAndroidX=true" >> gradle.properties
 
-    - name: 💾 Commitar e Enviar Correções (Push)
+    - name: 💾 Commitar Correções e o Gradlew (Push)
       run: |
         git config --global user.name 'GitHub Actions'
         git config --global user.email 'actions@github.com'
         
-        # Adiciona os arquivos modificados
-        git add gradle/wrapper/gradle-wrapper.properties gradle.properties
+        # Adiciona o script gradlew gerado e as configs
+        git add gradlew gradlew.bat gradle/wrapper/gradle-wrapper.properties gradle/wrapper/gradle-wrapper.jar gradle.properties
         
-        # Verifica se há mudanças antes de commitar para não dar erro
+        # Só commita se houver algo novo (para não quebrar se rodar 2x)
         if git diff --staged --quiet; then
-          echo "Nenhuma mudança necessária nos arquivos de configuração."
+          echo "Arquivos já estão corretos. Nada a commitar."
         else
-          git commit -m "Fix: Force Gradle 8.2 and remove Jetifier to fix build error"
+          git commit -m "Fix: Add missing Gradle Wrapper (8.2) and fix properties"
           git push
-          echo "Correções enviadas para o repositório."
+          echo "Gradle Wrapper enviado para o repositório."
         fi
 
     - name: ⚙️ Permissão de Execução
+      # Agora vai funcionar porque o passo anterior gerou o arquivo
       run: chmod +x gradlew
 
-    - name: 🧹 Limpar Cache do Build
+    - name: 🧹 Limpar Cache
       run: ./gradlew clean
 
     - name: 🔨 Compilar APK (Debug)
