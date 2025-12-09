@@ -1,0 +1,336 @@
+name: Migrate to Android & Build
+
+on:
+  workflow_dispatch: # Permite rodar manualmente clicando em um botão
+  push:
+    branches: [ "main", "master" ]
+    paths-ignore:
+      - 'app/**' # Não roda se a estrutura Android já existir para evitar loops
+
+permissions:
+  contents: write # Permissão para commitar a nova estrutura no repo
+
+jobs:
+  migrate-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: 🚀 Convert Project Structure to Android
+      run: |
+        # Verifica se já foi migrado
+        if [ -f "app/build.gradle" ]; then
+          echo "Projeto já parece ser Android. Pulando geração de estrutura."
+          exit 0
+        fi
+
+        echo "Iniciando migração..."
+
+        # 1. Criar diretórios
+        mkdir -p app/src/main/java/com/javasnes
+        mkdir -p app/src/main/java/snes
+        mkdir -p app/src/main/res/layout
+        mkdir -p app/src/main/res/values
+        mkdir -p app/src/main/res/mipmap-hdpi
+
+        # 2. Criar Configurações Gradle
+        # settings.gradle
+        echo "pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }" > settings.gradle
+        echo "dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }" >> settings.gradle
+        echo "rootProject.name = 'JavaSNES-Android'" >> settings.gradle
+        echo "include ':app'" >> settings.gradle
+
+        # build.gradle (Root)
+        echo "plugins { id 'com.android.application' version '8.2.0' apply false }" > build.gradle
+
+        # app/build.gradle
+        cat <<EOF > app/build.gradle
+        plugins { id 'com.android.application' }
+        android {
+            namespace 'com.javasnes'
+            compileSdk 34
+            defaultConfig {
+                applicationId "com.javasnes"
+                minSdk 24
+                targetSdk 34
+                versionCode 1
+                versionName "1.0"
+            }
+            buildTypes {
+                release {
+                    minifyEnabled false
+                    proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                }
+            }
+            compileOptions {
+                sourceCompatibility JavaVersion.VERSION_1_8
+                targetCompatibility JavaVersion.VERSION_1_8
+            }
+        }
+        dependencies {
+            implementation 'androidx.appcompat:appcompat:1.6.1'
+            implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+        }
+        EOF
+
+        # 3. Criar AndroidManifest
+        cat <<EOF > app/src/main/AndroidManifest.xml
+        <?xml version="1.0" encoding="utf-8"?>
+        <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+            <application
+                android:allowBackup="true"
+                android:label="JavaSNES Android"
+                android:theme="@style/Theme.AppCompat.NoActionBar">
+                <activity android:name=".MainActivity" android:screenOrientation="landscape" android:exported="true">
+                    <intent-filter>
+                        <action android:name="android.intent.action.MAIN" />
+                        <category android:name="android.intent.category.LAUNCHER" />
+                    </intent-filter>
+                </activity>
+            </application>
+        </manifest>
+        EOF
+
+        # 4. Gerar Classes Android (View e Activity)
+        # MainActivity
+        cat <<EOF > app/src/main/java/com/javasnes/MainActivity.java
+        package com.javasnes;
+        import android.app.Activity;
+        import android.os.Bundle;
+        import snes.SNES;
+        public class MainActivity extends Activity {
+            private SNES snes;
+            private EmulatorView emulatorView;
+            @Override
+            protected void onCreate(Bundle savedInstanceState) {
+                super.onCreate(savedInstanceState);
+                emulatorView = new EmulatorView(this);
+                setContentView(emulatorView);
+                new Thread(() -> {
+                    snes = new SNES(emulatorView);
+                    snes.initializeSNES();
+                    snes.mainLoop();
+                }).start();
+            }
+        }
+        EOF
+
+        # EmulatorView
+        cat <<EOF > app/src/main/java/com/javasnes/EmulatorView.java
+        package com.javasnes;
+        import android.content.Context;
+        import android.graphics.Bitmap;
+        import android.graphics.Canvas;
+        import android.view.View;
+        public class EmulatorView extends View {
+            private Bitmap bitmap;
+            private int[] pixels;
+            private final int WIDTH = 256;
+            private final int HEIGHT = 224;
+            public EmulatorView(Context context) {
+                super(context);
+                bitmap = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.RGB_565);
+                pixels = new int[WIDTH * HEIGHT];
+            }
+            public void updateFrame(int[][] screenBuffer) {
+                int index = 0;
+                for (int y = 0; y < HEIGHT; y++) {
+                    for (int x = 0; x < WIDTH; x++) {
+                        if (x < screenBuffer.length && y < screenBuffer[0].length) {
+                            pixels[index++] = screenBuffer[x][y] | 0xFF000000;
+                        } else { pixels[index++] = 0xFF000000; }
+                    }
+                }
+                post(() -> {
+                    bitmap.setPixels(pixels, 0, WIDTH, 0, 0, WIDTH, HEIGHT);
+                    invalidate();
+                });
+            }
+            @Override
+            protected void onDraw(Canvas canvas) {
+                super.onDraw(canvas);
+                canvas.drawBitmap(bitmap, null, new android.graphics.Rect(0, 0, getWidth(), getHeight()), null);
+            }
+        }
+        EOF
+
+        # 5. Adaptar Classes JavaSNES (Substituindo as originais)
+        # Screen.java
+        cat <<EOF > app/src/main/java/snes/Screen.java
+        package snes;
+        import com.javasnes.EmulatorView;
+        public class Screen {
+            SNES snes;
+            public Screen(SNES snes) { this.snes = snes; }
+            public void repaint() {
+                if(snes.androidView != null) snes.androidView.updateFrame(snes.video.screen);
+            }
+            public void paintImmediately(int x, int y, int w, int h) { repaint(); }
+        }
+        EOF
+
+        # SoundPlayer.java
+        cat <<EOF > app/src/main/java/snes/SoundPlayer.java
+        package snes;
+        import android.media.AudioFormat;
+        import android.media.AudioManager;
+        import android.media.AudioTrack;
+        import java.util.ArrayList;
+        public class SoundPlayer {
+            public static final int SAMPLESIZE = 32000;
+            public SNES snes;
+            private AudioTrack audioTrack;
+            private int minBufferSize;
+            public SoundPlayer(SNES snes, int bits) {
+                this.snes = snes;
+                minBufferSize = AudioTrack.getMinBufferSize(SAMPLESIZE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                if (minBufferSize > 0) {
+                    audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC, SAMPLESIZE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT, minBufferSize * 4, AudioTrack.MODE_STREAM);
+                    audioTrack.play();
+                }
+            }
+            public void dumpsound() {
+                if (audioTrack == null || snes.dsp.rawsound.size() == 0) return;
+                Integer[] bufferInt = snes.dsp.rawsound.toArray(new Integer[0]);
+                byte[] pcmData = new byte[bufferInt.length * 2];
+                for (int i = 0; i < bufferInt.length; i++) {
+                    int sample = bufferInt[i];
+                    pcmData[i * 2] = (byte) (sample & 0xff);
+                    pcmData[i * 2 + 1] = (byte) ((sample >> 8) & 0xff);
+                }
+                audioTrack.write(pcmData, 0, pcmData.length);
+                snes.dsp.rawsound.clear();
+            }
+        }
+        EOF
+
+        # SNES.java
+        cat <<EOF > app/src/main/java/snes/SNES.java
+        package snes;
+        import com.javasnes.EmulatorView;
+        import java.util.ArrayList;
+        public class SNES {
+            public Memory memory; public Processor65816 processor; public PPU ppu; public DMA[] dma = new DMA[8];
+            public Video video; public Screen screen; public SPC700 spc700; public DSP dsp;
+            public Object romhack = null; public boolean doromhack = false;
+            public Object gameboy = null; public boolean dogameboy = false;
+            public Object nes = null; public boolean dones = false;
+            public String gamename = "demo.smc"; public String sramname = "";
+            public boolean cycleAccurate = false; public boolean IRQEnabled = false; public boolean multithreaded = false;
+            public boolean apuEnabled = true; public boolean ischrono = false; public boolean debugMode = false;
+            public boolean mute = false; public boolean recalculateIPS = true;
+            public int FRAME_SKIP = 1; public int APU_INSTRUCTIONS_PER_CPU_INSTRUCTION = 3; public int CYCLES_PER_INSTRUCTION = 20;
+            private final int HBLANK_EVENT=0, HDMA_START_EVENT=1, HCOUNTER_EVENT=2, HDMA_INIT_EVENT=3, RENDER_EVENT=4, WRAM_REFRESH_EVENT=5;
+            public static final int CYCLES_UNTIL_HDMA_START=1106, CYCLES_UNTIL_HCOUNTER=1364, CYCLES_UNTIL_HDMA_INIT=20, CYCLES_UNTIL_RENDER=192, CYCLES_UNTIL_WRAM_REFRESH=538, CYCLES_UNTIL_HBLANK=1096;
+            public static final int WRAM_REFRESH_CYCLES=40;
+            int eventType = HBLANK_EVENT, nextEvent = 4, instructionsSinceHCOUNTER = 0;
+            public Lock pauselock; public long frameCount = 0; private boolean skipframe = false;
+            public double INSTRUCTIONS_PER_SECOND = 3000000; public boolean interruptPending = false; public boolean IRQLine = false;
+            private long frametime = 0; public double MAX_FPS = 60.0; public boolean singlestepframe = false;
+            private int apucountdown = 0; public long eventCycles = 0, lastEventCycles = 0;
+            public EmulatorView androidView;
+            public SNES(EmulatorView view) { this.androidView = view; constructSNES(); }
+            public void constructSNES() {
+                pauselock = new Lock(); processor = new Processor65816(this); memory = new Memory(this); spc700 = new SPC700(this);
+                dsp = new DSP(this); ppu = new PPU(this); video = new Video(this); screen = new Screen(this);
+                for(int i=0; i<8; i++) dma[i] = new DMA(this, i);
+            }
+            public void initializeSNES() { processor.reset(); spc700.reset(); ppu.ppureset(); eventType = 4; nextEvent = 192; }
+            public void mainLoop() {
+                frametime = System.currentTimeMillis(); eventCycles = lastEventCycles = 182;
+                while (true) {
+                    if (processor.NMItrigger) {
+                        if ((!cycleAccurate && processor.NMItriggerPosition <= instructionsSinceHCOUNTER) || (cycleAccurate && processor.NMItriggerPosition <= eventCycles)) {
+                            processor.NMItrigger = false; processor.NMItriggerPosition = 0xffff; processor.waitForInterrupt = false; processor.NMI();
+                        }
+                    }
+                    if (IRQEnabled && interruptPending) { interruptPending = false; processor.waitForInterrupt = false; if (IRQEnabled && !processor.IRQ) processor.IRQ(); }
+                    if (!processor.waitForInterrupt) processor.doAnInstruction();
+                    checkForInterrupt();
+                    if (apuEnabled && apucountdown++ == APU_INSTRUCTIONS_PER_CPU_INSTRUCTION) { spc700.runOnce(); apucountdown = 0; }
+                    if (!cycleAccurate) { processor.instructionsUntilEvent += CYCLES_PER_INSTRUCTION; instructionsSinceHCOUNTER += CYCLES_PER_INSTRUCTION; }
+                    if (!cycleAccurate) { while (processor.instructionsUntilEvent >= nextEvent) handleEvent(); } else { while (eventCycles >= nextEvent) handleEvent(); }
+                }
+            }
+            public void docycles(int count) { lastEventCycles = eventCycles; eventCycles += count; processor.cycleCount += count; checkForInterrupt(); }
+            public void checkForInterrupt() {
+                if (!IRQEnabled) return;
+                boolean thisIRQ = ppu.VInterruptsEnabled || ppu.HInterruptsEnabled;
+                if (IRQLine && thisIRQ) interruptPending = true;
+                if (thisIRQ) IRQLine = true;
+            }
+            public void handleEvent() {
+                switch (eventType) {
+                    case HBLANK_EVENT: nextEvent = CYCLES_UNTIL_HDMA_START; eventType = HDMA_START_EVENT; break;
+                    case HDMA_START_EVENT: nextEvent = CYCLES_UNTIL_HCOUNTER; eventType = HCOUNTER_EVENT; for (int d = 0; d < 8; d++) dma[d].doHDMA(); break;
+                    case HCOUNTER_EVENT:
+                        if (cycleAccurate) { eventCycles -= PPU.HMAX; lastEventCycles -= PPU.HMAX; } else { instructionsSinceHCOUNTER = 0; }
+                        if (processor.NMItriggerPosition != 0xffff && processor.NMItriggerPosition >= PPU.HMAX) processor.NMItriggerPosition -= PPU.HMAX;
+                        ppu.VCounter++;
+                        if (ppu.VCounter >= PPU.VMAX) { ppu.VCounter = 0; memory.physicalMemory[0x4210] = (byte) 0x02; processor.NMItrigger = false; processor.NMItriggerPosition = 0xffff; }
+                        if (ppu.VCounter == PPU.SNES_HEIGHT + PPU.FIRST_VISIBLE_LINE) {
+                            if (!skipframe) ppu.endScreenRefresh();
+                            frameCount++;
+                            long current = System.currentTimeMillis();
+                            if (current - frametime < 1000.0 / MAX_FPS) { try { Thread.sleep((int) (1000.0 / MAX_FPS - (current - frametime))); } catch (Exception e) {} }
+                            frametime = current;
+                            if (!mute) dsp.soundplayer.dumpsound(); else dsp.rawsound = new ArrayList<Integer>();
+                            memory.physicalMemory[0x4210] = (byte) 0x82;
+                            if ((memory.physicalMemory[0x4200] & 0x80) != 0) { processor.NMItrigger = true; processor.NMItriggerPosition = 12; }
+                        }
+                        if (ppu.VCounter == PPU.FIRST_VISIBLE_LINE) { if (!skipframe) ppu.startScreenRefresh(); }
+                        nextEvent = CYCLES_UNTIL_HDMA_INIT; eventType = HDMA_INIT_EVENT; break;
+                    case HDMA_INIT_EVENT: nextEvent = CYCLES_UNTIL_RENDER; eventType = RENDER_EVENT; if (ppu.VCounter == 0) { for (int d = 0; d < 8; d++) dma[d].startHDMA(); } break;
+                    case RENDER_EVENT:
+                        if (ppu.VCounter >= PPU.FIRST_VISIBLE_LINE && ppu.VCounter <= PPU.SNES_HEIGHT) { if (!skipframe) ppu.renderLine((ppu.VCounter - PPU.FIRST_VISIBLE_LINE) % PPU.SNES_HEIGHT); }
+                        nextEvent = CYCLES_UNTIL_WRAM_REFRESH; eventType = WRAM_REFRESH_EVENT; break;
+                    case WRAM_REFRESH_EVENT:
+                        if (cycleAccurate) { lastEventCycles = eventCycles; eventCycles += WRAM_REFRESH_CYCLES; checkForInterrupt(); }
+                        nextEvent = CYCLES_UNTIL_HBLANK; eventType = HBLANK_EVENT; break;
+                }
+            }
+        }
+        EOF
+
+        # 6. Mover Arquivos de Lógica
+        # Procura em src/snes (estrutura padrão) ou raiz
+        if [ -d "src/snes" ]; then
+            cp src/snes/*.java app/src/main/java/snes/
+        elif [ -f "CPU.java" ]; then
+            cp *.java app/src/main/java/snes/
+        fi
+        
+        # Remover arquivos incompatíveis da pasta de destino
+        rm -f app/src/main/java/snes/SNESGUI.java app/src/main/java/snes/BGGUI.java app/src/main/java/snes/Popup.java app/src/main/java/snes/SNESApplet.java
+
+        echo "Estrutura Android Gerada."
+
+    - name: Commit Android Structure
+      run: |
+        git config --global user.name 'GitHub Actions'
+        git config --global user.email 'actions@github.com'
+        git add .
+        # Só commita se houver mudanças para evitar erro
+        git diff --quiet && git diff --staged --quiet || git commit -m "Auto-convert to Android Project Structure"
+        git push
+
+    - name: Generate Gradle Wrapper
+      run: gradle wrapper
+
+    - name: Build APK
+      run: ./gradlew assembleDebug
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-debug
+        path: app/build/outputs/apk/debug/app-debug.apk
