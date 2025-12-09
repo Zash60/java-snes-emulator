@@ -1,4 +1,4 @@
-name: Add ROM & Build APK
+name: Build with MY ROM
 
 on:
   push:
@@ -9,70 +9,65 @@ permissions:
   contents: write
 
 jobs:
-  add-rom-and-build:
+  build-my-rom:
     runs-on: ubuntu-latest
 
     steps:
-    - name: 📥 Checkout Code
+    - name: 📥 Checkout do Código
       uses: actions/checkout@v4
 
-    - name: ☕ Set up JDK 17
+    - name: ☕ Configurar Java 17
       uses: actions/setup-java@v4
       with:
         java-version: '17'
         distribution: 'temurin'
 
-    - name: 🎮 Baixar ROM de Teste (Homebrew)
+    - name: 🎮 Configurar a Sua ROM
       run: |
-        # Cria a pasta de assets do Android
         mkdir -p app/src/main/assets
         
-        # Baixa uma ROM Homebrew (Legal) - Classic Kong (Demo)
-        # Se o link quebrar, cria um arquivo dummy para não falhar o build
-        wget -O app/src/main/assets/game.smc "https://files.snes.party/roms/homebrew/Classic%20Kong%20(Complete).smc" || echo "DUMMY ROM" > app/src/main/assets/game.smc
+        # 1. Procura sua ROM (.smc, .sfc ou .gb) na raiz do repositório
+        echo "Procurando ROMs na raiz..."
+        MY_ROM=$(find . -maxdepth 1 -type f \( -name "*.smc" -o -name "*.sfc" -o -name "*.gb" \) | head -n 1)
         
-        echo "ROM baixada em app/src/main/assets/game.smc"
+        if [ -n "$MY_ROM" ]; then
+          echo "✅ ROM encontrada: $MY_ROM"
+          cp "$MY_ROM" app/src/main/assets/game.bin
+        else
+          echo "⚠️ Nenhuma ROM encontrada. Baixando Demo..."
+          wget -O app/src/main/assets/game.bin "https://github.com/PeterLemon/SNES/raw/master/Demo/Hello/Hello.snes"
+        fi
 
-    - name: 🛠️ Atualizar Código para Ler a ROM
+    - name: 🛠️ Aplicar Correções de Código (Android Port)
       run: |
-        # 1. ATUALIZAR MEMORY.JAVA (Para aceitar bytes diretos)
+        # 1. MEMORY.JAVA (Carregar Bytes Genéricos)
         cat <<EOF > app/src/main/java/snes/Memory.java
         package snes;
         public class Memory {
             public byte[] physicalMemory;
             public boolean HiROM = true;
-            public String name = "No ROM";
+            public String name = "Loaded ROM";
             public SNES snes;
-            
             public Memory(SNES snes) {
                 this.snes = snes;
-                physicalMemory = new byte[0x1000000]; // 16MB de espaço endereçável
-                // Inicializa RAM
+                physicalMemory = new byte[0x1000000];
                 for (int i=0x7e0000; i<0x7fffff; i++) physicalMemory[i]=0x55;
             }
-
             public void loadRomBytes(byte[] rawdata) {
-                System.out.println("Carregando ROM de " + rawdata.length + " bytes");
-                // Lógica simplificada de carregamento (LoROM/HiROM detection básica)
-                // Assume HiROM por padrão para o teste
+                // Tenta carregar no endereço padrão de HiROM (C00000)
                 int cartridgeOffset = rawdata.length % 0x1000;
-                
                 try {
-                    // Copia para a memória (Mapeamento HiROM simplificado)
                     for(int address=0xc00000; address<=0xffffff; address++) {
                         int index = address - 0xc00000 + cartridgeOffset;
-                        if (index < rawdata.length) {
-                            physicalMemory[address] = rawdata[index];
-                        }
+                        if (index < rawdata.length) physicalMemory[address] = rawdata[index];
                     }
-                    // Espelha vetores de interrupção
-                    physicalMemory[0xfffc] = rawdata[rawdata.length - 4]; // Reset Vector Low
-                    physicalMemory[0xfffd] = rawdata[rawdata.length - 3]; // Reset Vector High
-                } catch(Exception e) {
-                    System.out.println("Erro ao carregar ROM na memoria");
-                }
+                    // Configura vetores de reset
+                    if(rawdata.length > 4) {
+                        physicalMemory[0xfffc] = rawdata[rawdata.length - 4];
+                        physicalMemory[0xfffd] = rawdata[rawdata.length - 3];
+                    }
+                } catch(Exception e) { e.printStackTrace(); }
             }
-
             public byte readByte(int address) {
                 if (address >= 0 && address < physicalMemory.length) return physicalMemory[address];
                 return 0;
@@ -80,23 +75,24 @@ jobs:
             public void writeByte(int address, byte value) {
                 if (address >= 0 && address < physicalMemory.length) physicalMemory[address] = value;
             }
-            // Métodos de compatibilidade
+            // Mocks
             public void loadCartridge(Object c) {}
             public void loadMemoryState(String s) {}
             public String dumpMemoryState() { return ""; }
         }
         EOF
 
-        # 2. ATUALIZAR SNES.JAVA (Adicionar método loadRom)
+        # 2. SNES.JAVA (Lógica Principal)
         cat <<EOF > app/src/main/java/snes/SNES.java
         package snes;
         import com.javasnes.EmulatorView;
+        import java.util.ArrayList;
         public class SNES {
             public Memory memory; public Processor65816 processor; public PPU ppu; public DMA[] dma = new DMA[8];
             public Video video; public Screen screen; public SPC700 spc700; public DSP dsp;
             public Gameboy gameboy; public NES nes; public Romhack romhack;
             public boolean dogameboy = false; public boolean dones = false; public boolean doromhack = false;
-            public String gamename = "game.smc"; public String sramname = "";
+            public String gamename = "game.bin"; public String sramname = "";
             public boolean cycleAccurate = false; public boolean IRQEnabled = false; public boolean multithreaded = false;
             public boolean apuEnabled = true; public boolean ischrono = false; public boolean debugMode = false;
             public boolean mute = false; public boolean recalculateIPS = true;
@@ -125,30 +121,28 @@ jobs:
                 for(int i=0; i<8; i++) dma[i] = new DMA(this, i);
             }
             
-            // NOVO: Carrega os bytes na memoria e reseta
             public void loadRom(byte[] romData) {
                 memory.loadRomBytes(romData);
                 initializeSNES();
             }
 
             public void initializeSNES() { processor.reset(); spc700.reset(); ppu.ppureset(); }
+            
             public void mainLoop() {
                 long frametime = System.currentTimeMillis();
                 while (true) {
                     if(!processor.waitForInterrupt) processor.doAnInstruction();
-                    // Loop simplificado para evitar travamento no exemplo
-                    ppu.VCounter++;
+                    ppu.VCounter++; // Loop simplificado para evitar travamento
                     if(ppu.VCounter > 262) { 
                         ppu.VCounter = 0; 
                         if(!skipframe) ppu.endScreenRefresh();
-                        
-                        // Controle de FPS simples
                         long curr = System.currentTimeMillis();
                         if(curr - frametime < 16) { try { Thread.sleep(16 - (curr - frametime)); } catch(Exception e){} }
                         frametime = curr;
                     }
                 }
             }
+            // Mocks
             public void docycles(int i) {}
             public void saveSRAM() {}
             public void dumpStateToFile(String f) {}
@@ -174,7 +168,7 @@ jobs:
         }
         EOF
 
-        # 3. ATUALIZAR MAINACTIVITY.JAVA (Ler Assets)
+        # 3. MAINACTIVITY.JAVA (Carregar Asset 'game.bin')
         cat <<EOF > app/src/main/java/com/javasnes/MainActivity.java
         package com.javasnes;
         import android.app.Activity;
@@ -195,31 +189,55 @@ jobs:
 
                 new Thread(() -> {
                     snes = new SNES(emulatorView);
-                    
-                    // Ler ROM da pasta assets
                     try {
-                        InputStream is = getAssets().open("game.smc");
+                        // Lê o arquivo genérico 'game.bin' que foi copiado no passo anterior
+                        InputStream is = getAssets().open("game.bin");
                         byte[] romData = new byte[is.available()];
                         is.read(romData);
                         is.close();
-                        
-                        // Carregar no emulador
                         snes.loadRom(romData);
                         snes.mainLoop();
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
+                    } catch (IOException e) { e.printStackTrace(); }
                 }).start();
             }
         }
         EOF
 
-    - name: 💾 Commitar Mudanças
+        # 4. Outras Classes de Apoio (Video, Romhack)
+        cat <<EOF > app/src/main/java/snes/Video.java
+        package snes;
+        public class Video {
+            public int[][] screen; SNES snes; BGMap[] bg; public boolean spritesOn; public boolean windowsEnabled; public RenderThread renderThread;
+            public Video(SNES snes) {
+                this.snes=snes; screen=new int[256][224]; bg=new BGMap[5];
+                bg[1]=new BGMap(1); bg[2]=new BGMap(2); bg[3]=new BGMap(3); bg[4]=new BGMap(4);
+                renderThread = new RenderThread(); spritesOn=true; windowsEnabled=true;
+            }
+            public void updateWholeScreen() {} public void startScreenRefresh() {}
+            public void endScreenRefresh() { snes.screen.repaint(); }
+            public void updateLines(int scanline) {} public void updateMode() {} public void drawBGs() {}
+            public class BGMap { public boolean toggledOn=true; public BGMap(int i) {} public void updateMode() {} public int[][] getAllPixels() { return new int[0][0]; } }
+            public class RenderThread { public void endRefresh() {} public void startRefresh() {} public void render(int l) {} }
+        }
+        EOF
+
+        cat <<EOF > app/src/main/java/snes/Romhack.java
+        package snes;
+        public class Romhack {
+            public Romhack(SNES s, byte[] b, int i, int o) {}
+            public void instructionInfo(String s, boolean b, boolean b2, int i) {}
+            public void onfetch(int a, int v) {}
+            public void firstInstructionByte() {}
+            public void dumpKnownROM() {}
+        }
+        EOF
+
+    - name: 💾 Commitar e Atualizar Repositório
       run: |
         git config --global user.name 'GitHub Actions'
         git config --global user.email 'actions@github.com'
         git add .
-        git commit -m "Feat: Add ROM loading support via Assets" || echo "Nada para commitar"
+        git diff --staged --quiet || git commit -m "Update: Configure ROM and fix classes"
         git push
 
     - name: ⚙️ Configurar Gradle
@@ -233,5 +251,5 @@ jobs:
     - name: 📤 Upload do APK
       uses: actions/upload-artifact@v4
       with:
-        name: snes-android-with-rom
+        name: snes-android-game
         path: app/build/outputs/apk/debug/app-debug.apk
